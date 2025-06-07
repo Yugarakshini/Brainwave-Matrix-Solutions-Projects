@@ -1,0 +1,196 @@
+import tkinter as tk
+from tkinter import messagebox
+import re
+import requests
+from urllib.parse import urlparse
+
+# --- Typosquatting and NLP Config ---
+brand_words = ["apple", "paypal", "amazon", "bank", "microsoft", "google", "facebook", "adidas", "netflix"]
+phish_context_words = [
+    "login", "signin", "verify", "update", "secure", "account", "webscr", "bonus", "free", "password", "confirm", "support", "security"
+]
+# Common phishing substitutions
+subs = {
+    "0": "o",
+    "1": ["l", "i"],
+    "3": "e",
+    "5": "s",
+    "@": "a",
+    "$": "s",
+    "!" : "i"
+}
+
+def similar(a, b):
+    """Levenshtein distance for typo detection (max distance 1 is suspicious)."""
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > 1:
+        return 2  # Too different
+    # Insertion, deletion, or substitution
+    if len(a) == len(b):
+        diff = sum(1 for x, y in zip(a, b) if x != y)
+        return diff
+    if len(a) + 1 == len(b):
+        # Insertion in a
+        for i in range(len(b)):
+            if a == b[:i] + b[i+1:]:
+                return 1
+    if len(a) - 1 == len(b):
+        # Deletion in a
+        for i in range(len(a)):
+            if b == a[:i] + a[i+1:]:
+                return 1
+    return 2
+
+def substitute_variants(word):
+    """Generate variants using phishing substitutions."""
+    variants = set()
+    # Replace each character with its phishing variant
+    for i, c in enumerate(word):
+        if c in subs:
+            replacements = subs[c] if isinstance(subs[c], list) else [subs[c]]
+            for rep in replacements:
+                v = word[:i] + rep + word[i+1:]
+                variants.add(v)
+    return variants
+
+def tokenize_url(url):
+    # Split by /,.,-,_,? and remove empty tokens
+    tokens = re.split(r"[\/\.\-\_\?\:]+", url)
+    return [t for t in tokens if t]
+
+def context_phishing_score(url):
+    tokens = tokenize_url(url.lower())
+    score = 0
+    notes = []
+    for i, token in enumerate(tokens):
+        # Check for (almost) brand word in token
+        for brand in brand_words:
+            # Direct match
+            if brand in token:
+                # Context scan as before
+                left = tokens[i-1] if i > 0 else ""
+                right = tokens[i+1] if i < len(tokens)-1 else ""
+                for ctx in phish_context_words:
+                    if ctx in left or ctx in right:
+                        score += 2
+                        notes.append(f"Brand '{brand}' near suspicious word '{ctx}': ...{left} {token} {right}...")
+                    elif ctx in token:
+                        score += 3
+                        notes.append(f"Brand '{brand}' in same token as suspicious word '{ctx}': {token}")
+                # Brand with numbers
+                if re.search(rf"{brand}\d+", token):
+                    score += 2
+                    notes.append(f"Brand '{brand}' with number: {token}")
+                # Subdomain check
+                if i < len(tokens) - 2:
+                    tld = tokens[-1]
+                    domain = tokens[-2]
+                    if brand == tokens[i] and domain not in [brand, "com", "org", "net"]:
+                        score += 2
+                        notes.append(f"Brand '{brand}' as subdomain of '{domain}': {token}.{domain}.{tld}")
+            # Typosquatting: Levenshtein distance
+            elif similar(token, brand) == 1:
+                score += 3
+                notes.append(f"Token '{token}' is a typo of brand '{brand}'.")
+            # Substitution variants
+            elif any(variant == brand for variant in substitute_variants(token)):
+                score += 3
+                notes.append(f"Token '{token}' is a suspicious substitution of brand '{brand}'.")
+    # Additional checks
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        score += 1
+        notes.append("URL does not use HTTPS.")
+    if re.match(r"(bit\.ly|t\.co|tinyurl|ow\.ly|rebrand\.ly)", parsed.netloc):
+        score += 3
+        notes.append("URL uses a known shortener.")
+    return score, notes
+
+def scan_url():
+    url = url_entry.get().strip()
+    if not url:
+        messagebox.showwarning("Missing URL", "Please enter a URL to scan.")
+        return
+    if not re.match(r'^https?://', url):
+        url = 'https://' + url
+
+    result_box.config(state=tk.NORMAL)
+    result_box.delete('1.0', tk.END)
+
+    score, notes = context_phishing_score(url)
+
+    if score >= 5:
+        result_box.insert(tk.END, f"⚠️  High risk of phishing! (typosquatting/impersonation detected)\n\n", "suspicious")
+    elif score >= 2:
+        result_box.insert(tk.END, f"⚠️  Possibly suspicious. Review context:\n\n", "warning")
+    else:
+        result_box.insert(tk.END, f"✅ No strong phishing indicators found.\n\n", "safe")
+
+    for n in notes:
+        result_box.insert(tk.END, f"- {n}\n", "note")
+
+    result_box.insert(tk.END, f"\n🔗 Scanned URL: {url}\n", "url")
+    result_box.config(state=tk.DISABLED)
+
+
+def show_about():
+    about_message = (
+        "Your Security, Our Promise\n\n"
+        "Every day, millions of people like you trust the internet with their hopes, dreams, and the details of their lives. "
+        "But lurking behind innocent-looking links can be threats designed to steal what’s most precious—your privacy, your identity, your peace of mind.\n\n"
+        "PhishSafe Pro was built with one mission: to protect you and your loved ones from the invisible dangers of phishing scams. "
+        "We know that behind every click is a story—a parent, a student, a friend—someone who deserves to browse with confidence and sleep soundly at night.\n\n"
+        "We use advanced technology and a deep understanding of how cybercriminals operate to keep you safe. But more than that, we care. "
+        "Every feature, every scan, every warning is powered by the belief that your security matters.\n\n"
+        "Stay safe. Stay strong. And remember: you’re not alone in the fight against online threats. "
+        "With PhishSafe Pro, your digital world just got a little brighter, and a lot more secure.\n\n"
+        "We’ve got your back—one link at a time."
+    )
+    messagebox.showinfo("About PhishSafe Pro", about_message)
+
+# --- GUI Design ---
+
+root = tk.Tk()
+root.title("PhishSafe Pro - Advanced Anti-Phishing Link Scanner")
+root.geometry("620x460")
+root.configure(bg="#222b45")
+
+header = tk.Label(root, text="PhishSafe Pro - Advanced Anti-Phishing Link Scanner",
+                  bg="#222b45", fg="#ffe066", font=("Arial Rounded MT Bold", 15, "bold"))
+header.pack(pady=(20, 5))
+
+subheader = tk.Label(root, text="Paste a URL below to check for phishing risk (typosquatting & context-aware).",
+                     bg="#222b45", fg="#a0e9ff", font=("Segoe UI", 11, "italic"))
+subheader.pack()
+
+frame = tk.Frame(root, bg="#222b45")
+frame.pack(pady=15)
+
+url_entry = tk.Entry(frame, width=54, font=("Segoe UI", 13), bg="#fffbe8", fg="#222b45", borderwidth=3, relief="groove")
+url_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+scan_button = tk.Button(frame, text="Scan Link 🚦", font=("Arial Rounded MT Bold", 13, "bold"),
+                        bg="#ff9f43", fg="#222b45", activebackground="#ffe066",
+                        relief="raised", command=scan_url)
+scan_button.pack(side=tk.LEFT)
+
+about_button = tk.Button(root, text="About", font=("Arial Rounded MT Bold", 11),
+                         bg="#48dbfb", fg="#222b45", activebackground="#a0e9ff",
+                         relief="raised", command=show_about)
+about_button.pack(pady=(0, 10))
+
+result_box = tk.Text(root, width=76, height=13, font=("Consolas", 11), wrap=tk.WORD, bg="#2d3548", fg="#eeeeee", borderwidth=2)
+result_box.pack(pady=8)
+result_box.tag_config("suspicious", foreground="#ff4e54", font=("Consolas", 12, "bold"))
+result_box.tag_config("warning", foreground="#ff9f43", font=("Consolas", 11, "bold"))
+result_box.tag_config("safe", foreground="#1dd1a1", font=("Consolas", 11, "bold"))
+result_box.tag_config("url", foreground="#ffe066", font=("Consolas", 11, "bold"))
+result_box.tag_config("note", foreground="#48dbfb", font=("Consolas", 11, "italic"))
+result_box.config(state=tk.DISABLED)
+
+credit = tk.Label(root, text="Stay safe online! | PhishSafe Pro by Yugarakshini",
+                  font=("Segoe UI", 9, "italic"), bg="#222b45", fg="#a0e9ff")
+credit.pack(side=tk.BOTTOM, pady=5)
+
+root.mainloop()
